@@ -14,7 +14,6 @@ import EmployeeWorkRecordsStats from './EmployeeWorkRecordsStats';
 import ClientPaymentSummary from './ClientPaymentSummary';
 import { useApp } from '../hooks/useApp';
 
-
 interface ClientPortalProps {
     client: Client;
 }
@@ -33,7 +32,7 @@ const getStatusColor = (status: string) => {
 };
 
 const ClientPortal: React.FC<ClientPortalProps> = ({ client }) => {
-    const { updateCandidateFeedback } = useApp();
+    const { updateCandidateFeedback, refreshData } = useApp();
     const [selectedCandidate, setSelectedCandidate] = useState<Candidate | null>(null);
     const [isDrawerOpen, setIsDrawerOpen] = useState(false);
     const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -97,7 +96,10 @@ const ClientPortal: React.FC<ClientPortalProps> = ({ client }) => {
                 {/* Tab Navigation */}
                 <div className="flex gap-4 mb-8 border-b border-slate-200">
                     <button
-                        onClick={() => setActiveTab('candidates')}
+                        onClick={() => {
+                            setActiveTab('candidates');
+                            refreshData();
+                        }}
                         className={`px-4 py-3 font-semibold transition-colors ${
                             activeTab === 'candidates'
                                 ? 'text-primary border-b-2 border-primary'
@@ -107,7 +109,10 @@ const ClientPortal: React.FC<ClientPortalProps> = ({ client }) => {
                         Candidates
                     </button>
                     <button
-                        onClick={() => setActiveTab('workRecords')}
+                        onClick={() => {
+                            setActiveTab('workRecords');
+                            refreshData();
+                        }}
                         className={`px-4 py-3 font-semibold transition-colors ${
                             activeTab === 'workRecords'
                                 ? 'text-primary border-b-2 border-primary'
@@ -117,7 +122,10 @@ const ClientPortal: React.FC<ClientPortalProps> = ({ client }) => {
                         Work Records Stats
                     </button>
                     <button
-                        onClick={() => setActiveTab('hoursSummary')}
+                        onClick={() => {
+                            setActiveTab('hoursSummary');
+                            refreshData();
+                        }}
                         className={`px-4 py-3 font-semibold transition-colors ${
                             activeTab === 'hoursSummary'
                                 ? 'text-primary border-b-2 border-primary'

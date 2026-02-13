@@ -1,4 +1,3 @@
-
 import React, { createContext, useContext, useState, ReactNode } from 'react';
 import { Client, Candidate, CandidateStatus, Recruiter, RecruiterSession, ClientForRecruiter, HourLogEntry, WorkRecord } from '../types';
 import { supabase } from '../lib/supabase';
@@ -18,6 +17,9 @@ interface AppContextType {
     loginAsRecruiter: (username: string, password: string) => Promise<boolean>;
     logout: () => void;
     updateAdminPassword: (newPassword: string) => Promise<void>;
+    
+    // NEW: Function to manually trigger a silent data refresh
+    refreshData: () => Promise<void>;
     
     // Client CRUD
     addClient: (clientData: { name: string; email: string; phone_number: string }) => Promise<void>;
@@ -41,11 +43,9 @@ interface AppContextType {
     updateHourLogEntry: (entryId: string, updated: Partial<HourLogEntry>) => Promise<void>;
     deleteHourLogEntry: (entryId: string) => Promise<void>;
 
-    // Payment Tracking - distribute payment across entries
+    // Payment Tracking
     recordClientPayment: (clientId: string, entryIds: string[], amount: number) => Promise<void>;
     clearPaymentsForEntries: (clientId: string, entryIds: string[]) => Promise<void>;
-
-    // Payment Status Management
     markRecordsAsPaid: (recordIds: string[]) => Promise<void>;
 }
 
@@ -63,30 +63,40 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const [isLoading, setIsLoading] = useState<boolean>(false);
     const [error, setError] = useState<string | null>(null);
     const [adminPassword, setAdminPassword] = useState(() => localStorage.getItem(ADMIN_PASSWORD_KEY) || 'admin123');
-    
+
+    // SILENT REFRESH LOGIC
+    const refreshData = async () => {
+        try {
+            if (currentUser === 'admin') {
+                await fetchAdminData();
+            } else if (currentUser === 'client' && currentClient?.access_code) {
+                const { data } = await supabase.from('clients').select('*, candidates(*, recruiters(username))').eq('access_code', currentClient.access_code).single();
+                const { data: workData } = await supabase.from('sf_work_records').select('*').order('created_at', { ascending: false });
+                const { data: logData } = await supabase.from('hour_log_entries').select('*, candidates(*, clients(name))').order('entry_date', { ascending: false });
+                
+                if (data) setCurrentClient(data as Client);
+                if (workData) setWorkRecords(workData as WorkRecord[]);
+                if (logData) setHourLogEntries(logData as HourLogEntry[]);
+            } else if (currentUser === 'recruiter' && currentRecruiter) {
+                 const { data: allClients } = await supabase.from('clients').select('id, name, access_code, candidates(*, recruiters(username))').order('created_at', { ascending: true });
+                 if (allClients) setCurrentRecruiter(prev => prev ? { ...prev, clients: allClients as ClientForRecruiter[] } : null);
+            }
+        } catch (error) {
+            console.error("Failed to silently refresh data:", error);
+        }
+    };
+
     const fetchAdminData = async () => {
-        const { data: clientData, error: clientError } = await supabase
-            .from('clients')
-            .select('*, candidates(*, recruiters(username)), recruiters(*)')
-            .order('created_at', { ascending: true });
+        const { data: clientData, error: clientError } = await supabase.from('clients').select('*, candidates(*, recruiters(username)), recruiters(*)').order('created_at', { ascending: true });
         if (clientError) throw clientError;
 
-        const { data: recruiterData, error: recruiterError } = await supabase
-            .from('recruiters')
-            .select('*')
-            .order('created_at', { ascending: true });
+        const { data: recruiterData, error: recruiterError } = await supabase.from('recruiters').select('*').order('created_at', { ascending: true });
         if (recruiterError) throw recruiterError;
         
-        const { data: logData, error: logError } = await supabase
-            .from('hour_log_entries')
-            .select('*, candidates(*, clients(name))')
-            .order('entry_date', { ascending: false });
+        const { data: logData, error: logError } = await supabase.from('hour_log_entries').select('*, candidates(*, clients(name))').order('entry_date', { ascending: false });
         if (logError) throw logError;
 
-        const { data: workData, error: workError } = await supabase
-            .from('sf_work_records')
-            .select('*')
-            .order('created_at', { ascending: false });
+        const { data: workData, error: workError } = await supabase.from('sf_work_records').select('*').order('created_at', { ascending: false });
         if (workError) throw workError;
 
         setClients(clientData as any);
@@ -130,29 +140,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
                 .single();
             if (error || !data) throw new Error('Invalid access code. Please try again.');
             
-            console.log('[loginAsClient] Client found:', data.id, data.name, 'with', data.candidates?.length, 'candidates');
-            
-            // Fetch work records for this client
-            const { data: workData, error: workError } = await supabase
-                .from('sf_work_records')
-                .select('*')
-                .order('created_at', { ascending: false });
+            const { data: workData, error: workError } = await supabase.from('sf_work_records').select('*').order('created_at', { ascending: false });
             if (workError) throw workError;
 
-            console.log('[loginAsClient] Fetched', workData?.length, 'total work records');
-
-            // Fetch hour log entries for this client
-            const { data: logData, error: logError } = await supabase
-                .from('hour_log_entries')
-                .select('*, candidates(*, clients(name))')
-                .order('entry_date', { ascending: false });
+            const { data: logData, error: logError } = await supabase.from('hour_log_entries').select('*, candidates(*, clients(name))').order('entry_date', { ascending: false });
             if (logError) throw logError;
             
             setCurrentClient(data as Client);
             setWorkRecords(workData as WorkRecord[]);
             setHourLogEntries(logData as HourLogEntry[]);
             setCurrentUser('client');
-            console.log('[loginAsClient] Login complete');
             return true;
         } catch (e: any) {
             setError(e.message);
@@ -166,22 +163,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setIsLoading(true);
         setError(null);
         try {
-            const { data: recruiter, error: recruiterError } = await supabase
-                .from('recruiters')
-                .select('*')
-                .eq('username', username)
-                .eq('password', password)
-                .single();
+            const { data: recruiter, error: recruiterError } = await supabase.from('recruiters').select('*').eq('username', username).eq('password', password).single();
+            if (recruiterError || !recruiter) throw new Error('Invalid username or password.');
 
-            if (recruiterError || !recruiter) {
-                throw new Error('Invalid username or password.');
-            }
-
-            const { data: allClients, error: clientsError } = await supabase
-                .from('clients')
-                .select('id, name, access_code, candidates(*, recruiters(username))')
-                .order('created_at', { ascending: true });
-            
+            const { data: allClients, error: clientsError } = await supabase.from('clients').select('id, name, access_code, candidates(*, recruiters(username))').order('created_at', { ascending: true });
             if (clientsError) throw clientsError;
 
             const sessionData: RecruiterSession = {
@@ -264,7 +249,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     // --- Candidate & Hours CRUD ---
     const addHourLogEntry = async (entry: Omit<HourLogEntry, 'id' | 'candidates'> & { break_hours?: number; meetings_hours?: number }, newActiveHours: number, newNumSets: number) => {
-        // 1. Add the new log entry. Try full payload first; if DB is missing new columns, use base columns only.
         const fullPayload = {
             candidate_id: entry.candidate_id,
             entry_date: entry.entry_date,
@@ -292,18 +276,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         }
         if (insertError) throw insertError;
 
-        // 2. Update the candidate's cumulative record
         const { error: updateError } = await supabase
             .from('candidates')
-            .update({ 
-                active_hours: newActiveHours,
-                number_of_sets: newNumSets,
-                rate_per_hour: entry.rate_per_hour 
-            })
+            .update({ active_hours: newActiveHours, number_of_sets: newNumSets, rate_per_hour: entry.rate_per_hour })
             .eq('id', entry.candidate_id);
         if (updateError) throw updateError;
-
-        await fetchAdminData();
+        
+        await refreshData();
     };
 
     const updateHourLogEntry = async (entryId: string, updated: Partial<HourLogEntry>) => {
@@ -328,7 +307,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const { error: updateError } = await supabase.from('hour_log_entries').update(payload).eq('id', entryId);
         if (updateError) throw updateError;
 
-        // Update candidate cumulative totals (apply deltas)
         if (deltaHours !== 0 || deltaSets !== 0 || typeof updated.rate_per_hour === 'number') {
             const candidateId = oldEntry.candidate_id;
             const candidate = clients.flatMap(c => c.candidates).find(c => c.id === candidateId);
@@ -341,8 +319,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             const { error: candErr } = await supabase.from('candidates').update(candPayload).eq('id', candidateId);
             if (candErr) throw candErr;
         }
-
-        await fetchAdminData();
+        await refreshData();
     };
 
     const deleteHourLogEntry = async (entryId: string) => {
@@ -352,7 +329,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const { error: delError } = await supabase.from('hour_log_entries').delete().eq('id', entryId);
         if (delError) throw delError;
 
-        // Subtract the removed hours/sets from candidate totals
         const candidateId = oldEntry.candidate_id;
         const candidate = clients.flatMap(c => c.candidates).find(c => c.id === candidateId);
         const currentActive = Number(candidate?.active_hours ?? 0);
@@ -361,8 +337,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         const newNumSets = Math.max(0, currentSets - Number(oldEntry.sets_added ?? 0));
         const { error: candErr } = await supabase.from('candidates').update({ active_hours: newActive, number_of_sets: newNumSets }).eq('id', candidateId);
         if (candErr) throw candErr;
-
-        await fetchAdminData();
+        
+        await refreshData();
     };
 
 
@@ -461,29 +437,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         }
     };
 
-    // Payment Tracking - Update balance_paid in database
+    // Payment Tracking
     const recordClientPayment = async (clientId: string, entryIds: string[], amount: number) => {
-        // Get the entries to distribute payment
         const entriesToUpdate = hourLogEntries.filter(e => entryIds.includes(e.id));
-        if (entriesToUpdate.length === 0) {
-            throw new Error('No entries found to record payment');
-        }
+        if (entriesToUpdate.length === 0) throw new Error('No entries found to record payment');
 
-        // Sort entries by date (oldest first) to distribute payment to oldest outstanding first
-        const sortedEntries = [...entriesToUpdate].sort((a, b) =>
-            new Date(a.entry_date).getTime() - new Date(b.entry_date).getTime()
-        );
+        const sortedEntries = [...entriesToUpdate].sort((a, b) => new Date(a.entry_date).getTime() - new Date(b.entry_date).getTime());
 
         let remainingAmount = amount;
         const updates: { id: string; newBalance: number }[] = [];
 
-        // Distribute payment across entries, paying up to each entry's remaining owed amount
         for (const entry of sortedEntries) {
             if (remainingAmount <= 0) break;
-
             const currentBalance = Number(entry.balance_paid) || 0;
-
-            // Calculate what is owed for this entry
             const hours = Number(entry.hours_added) || 0;
             const breaks = Number((entry as any).break_hours ?? 0) || 0;
             const meetings = Number((entry as any).meetings_hours ?? 0) || 0;
@@ -501,40 +467,25 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             remainingAmount -= amountToPay;
         }
 
-        // Update all entries in the database
         for (const update of updates) {
-            const { error } = await supabase
-                .from('hour_log_entries')
-                .update({ balance_paid: update.newBalance })
-                .eq('id', update.id);
+            const { error } = await supabase.from('hour_log_entries').update({ balance_paid: update.newBalance }).eq('id', update.id);
             if (error) throw error;
         }
-
-        // Refresh the data
-        await fetchAdminData();
+        await refreshData();
     };
 
     const clearPaymentsForEntries = async (clientId: string, entryIds: string[]) => {
         const entriesToClear = hourLogEntries.filter(e => entryIds.includes(e.id));
         for (const entry of entriesToClear) {
-            const { error } = await supabase
-                .from('hour_log_entries')
-                .update({ balance_paid: 0 })
-                .eq('id', entry.id);
+            const { error } = await supabase.from('hour_log_entries').update({ balance_paid: 0 }).eq('id', entry.id);
             if (error) throw error;
         }
-        await fetchAdminData();
+        await refreshData();
     };
 
-    // Mark work records as paid
     const markRecordsAsPaid = async (recordIds: string[]) => {
-        if (recordIds.length === 0) {
-            throw new Error('No records to mark as paid');
-        }
+        if (recordIds.length === 0) throw new Error('No records to mark as paid');
 
-        console.log('[markRecordsAsPaid] Starting with record IDs:', recordIds);
-
-        // If payment_batch_id is used, find all records with the same batch ID
         let finalRecordIds = recordIds;
         const batchIds = workRecords
             .filter(r => recordIds.includes(r.id) && r.payment_batch_id)
@@ -542,57 +493,26 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             .filter(Boolean) as string[];
 
         if (batchIds.length > 0) {
-            // Include all records with these batch IDs
-            const batchRecordIds = workRecords
-                .filter(r => batchIds.includes(r.payment_batch_id || ''))
-                .map(r => r.id);
+            const batchRecordIds = workRecords.filter(r => batchIds.includes(r.payment_batch_id || '')).map(r => r.id);
             finalRecordIds = Array.from(new Set([...recordIds, ...batchRecordIds]));
-            console.log('[markRecordsAsPaid] Expanded to batch records. Final IDs:', finalRecordIds);
         }
 
-        // Update all records to 'paid' status
-        console.log('[markRecordsAsPaid] Updating', finalRecordIds.length, 'records to payment_status = paid');
         for (const recordId of finalRecordIds) {
-            const { error } = await supabase
-                .from('sf_work_records')
-                .update({ payment_status: 'paid' })
-                .eq('id', recordId);
-            if (error) {
-                console.error('[markRecordsAsPaid] Error updating record', recordId, error);
-                throw error;
-            }
+            const { error } = await supabase.from('sf_work_records').update({ payment_status: 'paid' }).eq('id', recordId);
+            if (error) throw error;
         }
-
-        // Refresh work records
-        console.log('[markRecordsAsPaid] Fetching updated work records');
-        const { data: workData, error: workError } = await supabase
-            .from('sf_work_records')
-            .select('*')
-            .order('created_at', { ascending: false });
-        if (workError) {
-            console.error('[markRecordsAsPaid] Error fetching updated records:', workError);
-            throw workError;
-        }
-
-        console.log('[markRecordsAsPaid] Updated. New total records:', workData?.length);
-        setWorkRecords(workData as WorkRecord[]);
+        await refreshData();
     };
-
-
 
     return (
         <AppContext.Provider value={{ 
             currentUser, currentClient, currentRecruiter, clients, recruiters, hourLogEntries, workRecords, isLoading, error, 
             loginAsAdmin, loginAsClient, loginAsRecruiter, logout,
-            updateAdminPassword,
+            updateAdminPassword, refreshData,
             addClient, updateClient, deleteClient, updateClientNotes, generateNewCode,
             addRecruiter, updateRecruiterPassword, deleteRecruiter,
             addCandidate, updateCandidate, deleteCandidate, addHourLogEntry, updateHourLogEntry, deleteHourLogEntry,
-            updateCandidateFeedback,
-            toggleCandidatePhoneVisibility,
-            recordClientPayment,
-            clearPaymentsForEntries,
-            markRecordsAsPaid,
+            updateCandidateFeedback, toggleCandidatePhoneVisibility, recordClientPayment, clearPaymentsForEntries, markRecordsAsPaid,
         }}>
             {children}
         </AppContext.Provider>

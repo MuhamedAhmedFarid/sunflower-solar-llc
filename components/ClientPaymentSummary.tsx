@@ -4,8 +4,6 @@ import CalendarIcon from './icons/CalendarIcon';
 import ClockIcon from './icons/ClockIcon';
 import DollarSignIcon from './icons/DollarSignIcon';
 import TrendingUpIcon from './icons/TrendingUpIcon';
-import PaymentModal from './PaymentModal';
-import TrashIcon from './icons/TrashIcon';
 
 // Helper function to convert HH:MM:SS format to minutes
 const parseTimeToMinutes = (timeValue: any): number => {
@@ -52,10 +50,10 @@ const ClientPaymentSummary: React.FC = () => {
     const { workRecords, currentClient, markRecordsAsPaid } = useApp();
     const [period, setPeriod] = useState<'day' | 'week' | 'biweekly' | 'month'>('month');
     const [selectedDate, setSelectedDate] = useState<string>(new Date().toISOString().split('T')[0]);
-    const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
     const [isProcessing, setIsProcessing] = useState(false);
     const [showPaidHistory, setShowPaidHistory] = useState(false);
     const [successMessage, setSuccessMessage] = useState<string | null>(null);
+    const [isConfirmModalOpen, setIsConfirmModalOpen] = useState(false); // Modal state added here
 
     // Get current client's employee IDs
     const clientEmployeeIds = useMemo(() => {
@@ -63,7 +61,7 @@ const ClientPaymentSummary: React.FC = () => {
         return new Set(currentClient.candidates.map(c => c.id).filter(Boolean));
     }, [currentClient]);
 
-    // Filter entries based on selected period and payment_status (pending or paid)
+    // Filter entries based on selected period and payment_status
     const filteredEntries = useMemo(() => {
         if (!currentClient || workRecords.length === 0) return [];
 
@@ -109,11 +107,12 @@ const ClientPaymentSummary: React.FC = () => {
         }
 
         const filtered = workRecords.filter((record) => {
-            // Filter by payment_status: paid or not paid
-            const paymentStatus = record.payment_status ?? 'pending';
+            // Default to 'unpaid' if missing
+            const paymentStatus = record.payment_status ?? 'unpaid';
             const statusMatch = showPaidHistory
                 ? paymentStatus === 'paid'
-                : paymentStatus !== 'paid'; // NOT paid (pending or unpaid)
+                : (paymentStatus === 'pending' || paymentStatus === 'unpaid'); // Show BOTH unpaid and pending
+            
             if (!statusMatch) return false;
             // Date range filter
             const recordDate = safeParseDate(record.date);
@@ -125,17 +124,15 @@ const ClientPaymentSummary: React.FC = () => {
         return filtered;
     }, [workRecords, period, selectedDate, currentClient, showPaidHistory, clientEmployeeIds]);
 
-    // Calculate totals from sf_work_records
+    // Calculate totals from ALL filtered records (Unpaid + Pending together)
     const summaryData = useMemo(() => {
-        console.log('[Summary] Calculating totals for', filteredEntries.length, 'entries');
-        
         const totalTalkTimeMinutes = filteredEntries.reduce((sum, record) => sum + parseTimeToMinutes(record.talkTime), 0);
         const totalWaitTimeMinutes = filteredEntries.reduce((sum, record) => sum + parseTimeToMinutes(record.waitTime), 0);
         const totalBreaksMinutes = filteredEntries.reduce((sum, record) => sum + parseTimeToMinutes(record.breakMinutes), 0);
         const totalMeetingsMinutes = filteredEntries.reduce((sum, record) => sum + parseTimeToMinutes(record.meetingMinutes), 0);
         const totalSets = filteredEntries.reduce((sum, record) => sum + (Number(record.setsAdded) || 0), 0);
         
-        // Calculate total: (talkTime + waitTime + breaks + meetings) * rate + (sets * 20)
+        // Calculate total for ALL un-archived logged work for the day
         const total = filteredEntries.reduce((sum, record) => {
             const talkHours = minutesToHours(parseTimeToMinutes(record.talkTime));
             const waitHours = minutesToHours(parseTimeToMinutes(record.waitTime));
@@ -143,20 +140,11 @@ const ClientPaymentSummary: React.FC = () => {
             const meetingHours = minutesToHours(parseTimeToMinutes(record.meetingMinutes));
             const rate = Number(record.ratePerHour) || 0;
             const sets = Number(record.setsAdded) || 0;
-            const recordTotal = ((talkHours + waitHours + breakHours + meetingHours) * rate) + (sets * 20);
-            if (filteredEntries.length < 5) {
-                console.log('[Summary] Record calc:', { rate, talkHours, waitHours, breakHours, meetingHours, sets, recordTotal });
-            }
-            return sum + recordTotal;
+            return sum + (((talkHours + waitHours + breakHours + meetingHours) * rate) + (sets * 20));
         }, 0);
 
-        // Get moes_total from records
         const moes_total = filteredEntries.reduce((sum, record) => sum + (Number((record as any).moes_total) || 0), 0);
-        
-        // Combined total = total + moes_total
         const last_total = total + moes_total;
-
-        console.log('[Summary] Totals:', { total, moes_total, last_total, recordCount: filteredEntries.length });
 
         return {
             totalTalkTime: formatMinutesAsTime(totalTalkTimeMinutes),
@@ -172,7 +160,6 @@ const ClientPaymentSummary: React.FC = () => {
         };
     }, [filteredEntries, selectedDate, period]);
 
-    // Create payment stats from the summary data
     const paymentStats = useMemo(() => {
         return {
             total: summaryData.total,
@@ -181,35 +168,45 @@ const ClientPaymentSummary: React.FC = () => {
         };
     }, [summaryData]);
 
-    const handlePaymentSubmit = async (amount: number) => {
-        if (summaryData.recordCount === 0) {
-            alert('No records found for this period');
-            return;
-        }
-        setIsProcessing(false);
-    };
+    // FILTER ONLY PENDING ENTRIES FOR THE BATCH SUMMARY
+    const pendingEntries = useMemo(() => {
+        return filteredEntries.filter(record => (record.payment_status ?? 'unpaid') === 'pending');
+    }, [filteredEntries]);
 
-    const handleClearPayment = async () => {
-        if (!currentClient) return;
-        setIsProcessing(false);
-    };
+    // CALCULATE BATCH-SPECIFIC TOTALS
+    const pendingSummary = useMemo(() => {
+        const total = pendingEntries.reduce((sum, record) => {
+            const talkHours = minutesToHours(parseTimeToMinutes(record.talkTime));
+            const waitHours = minutesToHours(parseTimeToMinutes(record.waitTime));
+            const breakHours = minutesToHours(parseTimeToMinutes(record.breakMinutes));
+            const meetingHours = minutesToHours(parseTimeToMinutes(record.meetingMinutes));
+            const rate = Number(record.ratePerHour) || 0;
+            const sets = Number(record.setsAdded) || 0;
+            return sum + (((talkHours + waitHours + breakHours + meetingHours) * rate) + (sets * 20));
+        }, 0);
 
+        const moes_total = pendingEntries.reduce((sum, record) => sum + (Number((record as any).moes_total) || 0), 0);
+        const last_total = total + moes_total;
+
+        return { total, moes_total, last_total, recordCount: pendingEntries.length };
+    }, [pendingEntries]);
+
+    // MARK AS PAID ACTION
     const handleMarkAsPaid = async () => {
-        if (filteredEntries.length === 0) {
-            alert('No pending records found for this period');
+        if (pendingEntries.length === 0) {
+            alert('No pending requests found for this period');
             return;
         }
 
         try {
             setIsProcessing(true);
-            const recordIds = filteredEntries.map(record => record.id);
-            console.log(`[Payment] Marking ${recordIds.length} records as paid:`, recordIds);
+            // ONLY collect IDs of 'pending' records
+            const recordIds = pendingEntries.map(record => record.id);
+            console.log(`[Payment] Marking ${recordIds.length} pending records as paid:`, recordIds);
+            
             await markRecordsAsPaid(recordIds);
             
-            // Show success message
-            setSuccessMessage('Payment confirmed. Records have been archived.');
-            
-            // Auto-hide success message after 5 seconds
+            setSuccessMessage('Payment confirmed. Requested records have been archived.');
             setTimeout(() => {
                 setSuccessMessage(null);
             }, 5000);
@@ -218,6 +215,7 @@ const ClientPaymentSummary: React.FC = () => {
             alert('Failed to mark records as paid: ' + (error instanceof Error ? error.message : 'Unknown error'));
         } finally {
             setIsProcessing(false);
+            setIsConfirmModalOpen(false); // Close modal when done
         }
     };
 
@@ -347,76 +345,80 @@ const ClientPaymentSummary: React.FC = () => {
                 </div>
             </div>
 
-            {/* Payment Totals */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                {/* Total Amount */}
+            {/* Overall Unpaid + Pending Totals (Informational) */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-6">
                 <div className="bg-gradient-to-br from-cyan-400 to-cyan-600 rounded-xl shadow-lg p-6 text-white">
                     <div className="flex items-center justify-between mb-4">
-                        <h3 className="text-sm font-medium opacity-90">Total</h3>
+                        <h3 className="text-sm font-medium opacity-90">Overall Total</h3>
                         <DollarSignIcon className="w-6 h-6 opacity-70" />
                     </div>
                     <p className="text-3xl font-bold">${paymentStats.total.toFixed(2)}</p>
-                    <p className="text-xs opacity-75 mt-2">Talk + Wait time billing</p>
+                    <p className="text-xs opacity-75 mt-2">Talk + Wait time billing (Total Generated)</p>
                 </div>
-
-                {/* Moes Total */}
                 <div className="bg-gradient-to-br from-orange-400 to-orange-600 rounded-xl shadow-lg p-6 text-white">
                     <div className="flex items-center justify-between mb-4">
-                        <h3 className="text-sm font-medium opacity-90">Moes Total</h3>
+                        <h3 className="text-sm font-medium opacity-90">Overall Moes Total</h3>
                         <DollarSignIcon className="w-6 h-6 opacity-70" />
                     </div>
                     <p className="text-3xl font-bold">${paymentStats.moes_total.toFixed(2)}</p>
-                    <p className="text-xs opacity-75 mt-2">Moes earnings</p>
+                    <p className="text-xs opacity-75 mt-2">Moes earnings (Total Generated)</p>
                 </div>
-
-                {/* Last Total (Combined) */}
                 <div className={`${showPaidHistory ? 'bg-slate-400 text-white' : 'bg-gradient-to-br from-emerald-400 to-emerald-600 text-white'} rounded-xl shadow-lg p-6`}>
                     <div className="flex items-center justify-between mb-4">
-                        <h3 className="text-sm font-medium opacity-90">Last Total</h3>
+                        <h3 className="text-sm font-medium opacity-90">Overall Combined</h3>
                         <DollarSignIcon className="w-6 h-6 opacity-70" />
                     </div>
                     <p className="text-3xl font-bold">${paymentStats.last_total.toFixed(2)}</p>
                     <p className="text-xs opacity-75 mt-2">
-                        {showPaidHistory ? 'Total Already Paid' : 'Total + Moes Total'}
+                        {showPaidHistory ? 'Total Already Paid' : 'Total Generated for period'}
                     </p>
                 </div>
             </div>
 
-            {/* Payment Summary */}
-            {summaryData.recordCount > 0 && !showPaidHistory && (
-                <div className="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl shadow-lg p-6 border border-blue-200">
-                    <h3 className="text-lg font-bold text-primary mb-4">Payment Summary</h3>
+            {/* Pending Batch Payment Summary UI */}
+            {!showPaidHistory && pendingSummary.recordCount > 0 && (
+                <div className="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl shadow-lg p-6 border border-blue-200 mt-8">
+                    <h3 className="text-lg font-bold text-primary mb-4">Payment Request (Pending Batch)</h3>
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                         <div className="flex items-center justify-between p-4 bg-white rounded-lg border border-slate-200">
-                            <span className="text-slate-700 font-semibold">Total Amount:</span>
-                            <span className="text-2xl font-bold text-cyan-600">${paymentStats.total.toFixed(2)}</span>
+                            <span className="text-slate-700 font-semibold">Requested Amount:</span>
+                            <span className="text-2xl font-bold text-cyan-600">${pendingSummary.total.toFixed(2)}</span>
                         </div>
                         <div className="flex items-center justify-between p-4 bg-white rounded-lg border border-slate-200">
-                            <span className="text-slate-700 font-semibold">Moes Total:</span>
-                            <span className="text-2xl font-bold text-orange-600">${paymentStats.moes_total.toFixed(2)}</span>
+                            <span className="text-slate-700 font-semibold">Requested Moes Total:</span>
+                            <span className="text-2xl font-bold text-orange-600">${pendingSummary.moes_total.toFixed(2)}</span>
                         </div>
                         <div className="flex items-center justify-between p-4 bg-white rounded-lg border border-slate-200">
-                            <span className="text-slate-700 font-bold">Last Total:</span>
-                            <span className="text-2xl font-bold text-emerald-600">${paymentStats.last_total.toFixed(2)}</span>
+                            <span className="text-slate-700 font-bold">Total to Pay Now:</span>
+                            <span className="text-2xl font-bold text-emerald-600">${pendingSummary.last_total.toFixed(2)}</span>
                         </div>
                     </div>
                     <div className="mt-4 p-4 bg-blue-100 rounded-lg border border-blue-300">
-                        <p className="text-sm text-slate-700"><span className="font-semibold">Records in Period:</span> {summaryData.recordCount}</p>
+                        <p className="text-sm text-slate-700"><span className="font-semibold">Records in Batch:</span> {pendingSummary.recordCount}</p>
                     </div>
-                    {/* Mark as Paid Button */}
+                    
+                    {/* Mark as Paid Button (Triggers Modal) */}
                     <button
-                        onClick={handleMarkAsPaid}
+                        onClick={() => setIsConfirmModalOpen(true)}
                         disabled={isProcessing}
                         className="w-full mt-6 bg-gradient-to-r from-emerald-500 to-green-600 hover:from-emerald-600 hover:to-green-700 disabled:from-slate-400 disabled:to-slate-500 text-white font-bold py-3 px-6 rounded-lg transition-all shadow-lg"
                     >
-                        {isProcessing ? 'Processing...' : '✓ Confirm & Mark as Paid'}
+                        {isProcessing ? 'Processing...' : '✓ Confirm & Pay Requested Batch'}
                     </button>
                 </div>
             )}
 
-            {/* Payment Summary - Paid History View */}
+            {/* Empty State when work is logged but no batch is requested */}
+            {!showPaidHistory && pendingSummary.recordCount === 0 && summaryData.recordCount > 0 && (
+                <div className="bg-slate-50 rounded-xl p-6 border-2 border-dashed border-slate-300 text-center mt-8">
+                    <h3 className="text-lg font-bold text-primary mb-1">No Pending Requests</h3>
+                    <p className="text-slate-600">Work has been logged for this period, but the admin hasn't generated a payment request batch yet.</p>
+                </div>
+            )}
+
+            {/* Paid History View Summary UI */}
             {summaryData.recordCount > 0 && showPaidHistory && (
-                <div className="bg-gradient-to-r from-slate-50 to-gray-50 rounded-xl shadow-lg p-6 border border-slate-200">
+                <div className="bg-gradient-to-r from-slate-50 to-gray-50 rounded-xl shadow-lg p-6 border border-slate-200 mt-8">
                     <h3 className="text-lg font-bold text-slate-700 mb-4">Paid History</h3>
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                         <div className="flex items-center justify-between p-4 bg-white rounded-lg border border-slate-200">
@@ -439,9 +441,51 @@ const ClientPaymentSummary: React.FC = () => {
             )}
 
             {summaryData.recordCount === 0 && (
-                <div className="bg-slate-50 rounded-xl p-6 border-2 border-dashed border-slate-300 text-center">
+                <div className="bg-slate-50 rounded-xl p-6 border-2 border-dashed border-slate-300 text-center mt-8">
                     <h3 className="text-lg font-bold text-primary mb-1">No Records Found</h3>
                     <p className="text-slate-600">There are no work records for the selected period.</p>
+                </div>
+            )}
+
+            {/* Confirmation Modal */}
+            {isConfirmModalOpen && (
+                <div className="fixed inset-0 bg-black/50 z-50 flex justify-center items-center p-4 animate-fade-in">
+                    <div className="bg-white rounded-2xl shadow-xl w-full max-w-md transform transition-all duration-300 scale-95 opacity-0 animate-fade-in-up">
+                        <div className="p-6">
+                            <h3 className="text-xl font-bold text-primary mb-3">Confirm Payment</h3>
+                            <div className="bg-slate-50 p-4 rounded-lg border border-slate-200 mb-6">
+                                <p className="text-slate-600 text-sm mb-1">You are about to confirm payment for:</p>
+                                <p className="text-3xl font-bold text-emerald-600">${pendingSummary.last_total.toFixed(2)}</p>
+                                <p className="text-xs text-slate-500 mt-2">({pendingSummary.recordCount} records in this batch)</p>
+                            </div>
+                            <p className="text-slate-700 text-sm mb-6">
+                                Are you sure you want to proceed? This will officially mark these records as paid and move them to your Paid History. This action cannot be undone.
+                            </p>
+                            <div className="flex gap-3 justify-end">
+                                <button
+                                    onClick={() => setIsConfirmModalOpen(false)}
+                                    disabled={isProcessing}
+                                    className="px-4 py-2 text-slate-700 font-semibold hover:bg-slate-100 rounded-lg transition-colors disabled:opacity-50"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    onClick={handleMarkAsPaid}
+                                    disabled={isProcessing}
+                                    className="px-4 py-2 bg-emerald-600 text-white font-semibold hover:bg-emerald-700 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center min-w-[140px]"
+                                >
+                                    {isProcessing ? (
+                                        <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                        </svg>
+                                    ) : (
+                                        'Yes, Confirm Payment'
+                                    )}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             )}
         </div>
