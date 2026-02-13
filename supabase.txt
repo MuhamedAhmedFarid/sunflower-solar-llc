@@ -1,0 +1,170 @@
+
+-- Supabase Schema for Recruitment Client Portal (Version 6 - Idempotent)
+-- This script removes the timestamp from candidates and adds a dedicated hour log table.
+
+-- 1. Drop existing objects in reverse dependency order to avoid errors.
+DROP POLICY IF EXISTS "Allow public full access to hour_log_entries" ON public.hour_log_entries;
+DROP POLICY IF EXISTS "Allow public full access to recruiter_clients" ON public.recruiter_clients;
+DROP POLICY IF EXISTS "Allow public full access to candidates" ON public.candidates;
+DROP POLICY IF EXISTS "Allow public full access to recruiters" ON public.recruiters;
+DROP POLICY IF EXISTS "Allow public full access to clients" ON public.clients;
+
+DROP TABLE IF EXISTS public.hour_log_entries;
+DROP TABLE IF EXISTS public.recruiter_clients;
+DROP TABLE IF EXISTS public.candidates;
+DROP TABLE IF EXISTS public.recruiters;
+DROP TABLE IF EXISTS public.clients;
+
+DROP TYPE IF EXISTS public.candidate_status;
+
+-- 2. Create a custom ENUM type for candidate status.
+CREATE TYPE public.candidate_status AS ENUM (
+    'Pending',
+    'Texted',
+    'Good',
+    'Interview',
+    'Interviewed',
+    'Rejected',
+    'Probation',
+    'Training'
+);
+
+-- 3. Create the 'clients' table.
+CREATE TABLE public.clients (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    name TEXT NOT NULL,
+    email TEXT,
+    phone_number TEXT,
+    access_code TEXT NOT NULL UNIQUE,
+    notes TEXT
+);
+COMMENT ON TABLE public.clients IS 'Stores information about client companies.';
+
+-- 4. Create the 'recruiters' table with a password column.
+CREATE TABLE public.recruiters (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    username TEXT NOT NULL UNIQUE,
+    password TEXT NOT NULL
+);
+COMMENT ON TABLE public.recruiters IS 'Stores recruiter user accounts.';
+COMMENT ON COLUMN public.recruiters.password IS 'Stores recruiter password. In a real app, this should be a secure hash.';
+
+
+-- 5. Create the 'candidates' table (Simplified: no hours_last_updated_at).
+CREATE TABLE public.candidates (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    client_id UUID NOT NULL REFERENCES public.clients(id) ON DELETE CASCADE,
+    recruiter_id UUID REFERENCES public.recruiters(id) ON DELETE SET NULL,
+    name TEXT NOT NULL,
+    role TEXT NOT NULL,
+    email TEXT,
+    whatsapp_number TEXT,
+    resume_link TEXT,
+    recording_link TEXT,
+    show_phone_to_client BOOLEAN DEFAULT false NOT NULL,
+    status public.candidate_status DEFAULT 'Pending'::public.candidate_status NOT NULL,
+    rating INT DEFAULT 0 CHECK (rating >= 0 AND rating <= 5),
+    comments TEXT,
+    rate_per_hour NUMERIC(10, 2) DEFAULT 0.00 NOT NULL,
+    total_hours NUMERIC(10, 2) DEFAULT 0.00 NOT NULL,
+    active_hours NUMERIC(10, 2) DEFAULT 0.00 NOT NULL,
+    number_of_sets INT DEFAULT 0 NOT NULL
+);
+CREATE INDEX idx_candidates_on_client_id ON public.candidates(client_id);
+CREATE INDEX idx_candidates_on_recruiter_id ON public.candidates(recruiter_id);
+COMMENT ON TABLE public.candidates IS 'Stores candidate profiles and feedback, linked to a client and a recruiter.';
+COMMENT ON COLUMN public.candidates.rate_per_hour IS 'Current hourly rate for payable candidate stages.';
+COMMENT ON COLUMN public.candidates.total_hours IS 'Total contracted or budgeted hours for the candidate.';
+COMMENT ON COLUMN public.candidates.active_hours IS 'CUMULATIVE total of hours actively worked or trained by the candidate.';
+COMMENT ON COLUMN public.candidates.number_of_sets IS 'Number of sets for additional payment calculation.';
+
+-- 6. Create the 'recruiter_clients' join table (Many-to-Many).
+CREATE TABLE public.recruiter_clients (
+    recruiter_id UUID NOT NULL REFERENCES public.recruiters(id) ON DELETE CASCADE,
+    client_id UUID NOT NULL REFERENCES public.clients(id) ON DELETE CASCADE,
+    PRIMARY KEY (recruiter_id, client_id)
+);
+COMMENT ON TABLE public.recruiter_clients IS 'Join table to manage many-to-many relationship between recruiters and clients.';
+
+-- 7. Create the 'hour_log_entries' table for daily timesheets.
+CREATE TABLE public.hour_log_entries (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    entry_date TIMESTAMP WITH TIME ZONE NOT NULL,
+    candidate_id UUID NOT NULL REFERENCES public.candidates(id) ON DELETE CASCADE,
+    hours_added NUMERIC(10, 2) NOT NULL,
+    rate_per_hour NUMERIC(10, 2) NOT NULL,
+    active_hours NUMERIC(10, 2) NOT NULL,
+    number_of_sets INT DEFAULT 0 NOT NULL,
+    balance_paid NUMERIC(10, 2) DEFAULT 0.00 NOT NULL,
+    notes TEXT
+);
+CREATE INDEX idx_hour_log_entries_candidate_id ON public.hour_log_entries(candidate_id);
+CREATE INDEX idx_hour_log_entries_entry_date ON public.hour_log_entries(entry_date);
+COMMENT ON TABLE public.hour_log_entries IS 'Logs individual timesheet entries for candidates to track work on specific dates.';
+COMMENT ON COLUMN public.hour_log_entries.active_hours IS 'Total active hours at the time of this entry.';
+COMMENT ON COLUMN public.hour_log_entries.number_of_sets IS 'Total number of sets at the time of this entry.';
+COMMENT ON COLUMN public.hour_log_entries.balance_paid IS 'Balance paid amount for this entry.';
+
+
+-- 8. Enable Row Level Security (RLS) for all tables.
+ALTER TABLE public.clients ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.recruiters ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.candidates ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.recruiter_clients ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.hour_log_entries ENABLE ROW LEVEL SECURITY;
+
+-- 9. Create RLS Policies for public access.
+CREATE POLICY "Allow public full access to clients" ON public.clients FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow public full access to recruiters" ON public.recruiters FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow public full access to candidates" ON public.candidates FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow public full access to recruiter_clients" ON public.recruiter_clients FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow public full access to hour_log_entries" ON public.hour_log_entries FOR ALL USING (true) WITH CHECK (true);
+
+-- 10. Seed Data (Optional, for demonstration)
+do $$
+declare
+  client1_id uuid := gen_random_uuid();
+  client2_id uuid := gen_random_uuid();
+  recruiter1_id uuid := gen_random_uuid();
+  recruiter2_id uuid := gen_random_uuid();
+  candidate_eve_id uuid;
+begin
+  -- Insert Clients
+  INSERT INTO public.clients (id, name, email, phone_number, access_code, notes) VALUES
+  (client1_id, 'Innovate Inc.', 'contact@innovate.com', '123-456-7890', 'INNOV8', 'Looking for mid-to-senior level engineers. Offer for UX designer position is ready.'),
+  (client2_id, 'Synergy Solutions', 'hr@synergy.com', '987-654-3210', 'SYN3RGY', '');
+
+  -- Insert Recruiters
+  INSERT INTO public.recruiters (id, username, password) VALUES
+  (recruiter1_id, 'Alice', 'password123'),
+  (recruiter2_id, 'Bob', 'password123');
+
+  -- Assign Recruiters to Clients
+  INSERT INTO public.recruiter_clients (recruiter_id, client_id) VALUES
+  (recruiter1_id, client1_id),
+  (recruiter2_id, client1_id),
+  (recruiter2_id, client2_id);
+
+  -- Insert Candidates for Innovate Inc.
+  INSERT INTO public.candidates (client_id, recruiter_id, name, role, email, whatsapp_number, resume_link, recording_link, show_phone_to_client, status, rating, comments, rate_per_hour, total_hours, active_hours, number_of_sets) VALUES
+  (client1_id, recruiter1_id, 'Charlie Brown', 'Frontend Developer', 'charlie.brown@example.com', '+15551112222', 'https://example.com/resume/cbrown', 'https://example.com/recording/cbrown', true, 'Good', 4, 'Strong portfolio, good communication skills.', 0, 0, 0, 0),
+  (client1_id, NULL, 'Diana Prince', 'UX Designer', 'diana.prince@example.com', '+15553334444', 'https://example.com/resume/dprince', NULL, false, 'Pending', 0, '', 0, 0, 0, 0)
+  RETURNING id INTO candidate_eve_id;
+
+  INSERT INTO public.candidates (id, client_id, recruiter_id, name, role, email, whatsapp_number, resume_link, recording_link, show_phone_to_client, status, rating, comments, rate_per_hour, total_hours, active_hours, number_of_sets) VALUES
+  (candidate_eve_id, client1_id, recruiter2_id, 'Eve Moneypenny', 'Project Manager', 'eve.m@example.com', '+442079460007', 'https://example.com/resume/emoneypenny', 'https://example.com/recording/emoneypenny', false, 'Probation', 5, 'Excellent experience, seems like a great fit for the team culture.', 20, 40, 15, 2);
+
+
+  -- Insert Candidates for Synergy Solutions
+  INSERT INTO public.candidates (client_id, recruiter_id, name, role, email, whatsapp_number, resume_link, recording_link, show_phone_to_client, status, rating, comments, rate_per_hour, total_hours, active_hours, number_of_sets) VALUES
+  (client2_id, recruiter2_id, 'Frank Castle', 'Backend Engineer', NULL, '+15558889999', 'https://example.com/resume/fcastle', NULL, false, 'Rejected', 2, 'Lacked experience with our specific tech stack.', 0, 0, 0, 0);
+
+  -- Insert Hour Log Entries for Eve
+  INSERT INTO public.hour_log_entries (candidate_id, entry_date, hours_added, rate_per_hour, active_hours, number_of_sets, balance_paid, notes) VALUES
+  (candidate_eve_id, now() - interval '2 days', 8, 20.00, 8, 0, 0.00, 'Onboarding session.'),
+  (candidate_eve_id, now() - interval '1 day', 7, 20.00, 15, 2, 0.00, 'Initial project work.');
+
+end $$;

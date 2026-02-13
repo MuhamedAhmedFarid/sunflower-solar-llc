@@ -1,0 +1,5 @@
+{
+  "name": "Sunflower llc Recruitment Portal",
+  "description": "A professional dashboard for clients to view qualified candidates and provide feedback, replacing manual spreadsheets. Admins can manage clients and candidates, while clients access a filtered view using a unique code.",
+  "requestFramePermissions": []
+}
